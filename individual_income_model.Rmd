@@ -388,7 +388,7 @@ str(object = dicts, give.atr = F, level = 2, vec.len = 2)
 
 ## Data Loading and joining
 
-At 253MB (70MB + 183MB), this dataset should not present issues on any reasonably modern hardware setup, and that is precisely the reason why the PUMS dataset exists. Since the PUMS files are a 1% random sampling of the full state dataset, and assuming reasonable stability in the size of the fields, the size of the full dataset would range around 25GB. This would indubitably would be quite more demanding, but still not enough to be a limiting factor of the steps carried out in this particular study. 
+At 253MB (70MB + 183MB), this dataset should not present issues on any reasonably modern hardware setup, and that is precisely the reason why the PUMS dataset exists. Since the PUMS files are a 1% random sampling of the full state dataset, and assuming reasonable stability in the size of the fields, the size of the full dataset would range around 25GB. This would indubitably be quite more demanding, but still not enough to be a limiting factor of the steps carried out in this particular study. 
 
 If this was a national study done with the full ACS dataset instead of a Texas-focused PUMS study, then the size of the raw dataset would indeed be a limiting factor, and loading the entire dataset into memory would not be feasible on consumer-grade hardware. Supposing that it is not worth it to load the dataset into a distributed filesystem setup, the healthier approach would be to start discarding portions of the data that would not be used in the model. If discarding all those columns was not enough for the full dataset, then performing a sample of the data could suffice to diagnose, re-structure and calibrate the desired model. However, assuring a representative sampling can potentially be more time consuming than the study itself.
 
@@ -468,7 +468,7 @@ As expected, these columns mostly correspond to geographical entries that are al
 dat <- discard_cols(dt = dat, cols = unique_values$column)
 ```
 
-With that, we went from 517 to 218 variables, a much more manageable amount of columns to consider in our model. We can now proceed to decode all categorical variables: the strategy here is to fetch the values specified in the data dictionary, and rewrite the values of each column by reference for the minimum memory overhead possible.
+With that, we went from 517 to 218 variables, a much more manageable amount of columns to consider in our model. We can now proceed with studying the contents of such columns.
 
 ## Valid data coverage
 
@@ -480,11 +480,11 @@ na_perc <- na_percentage(dat) %>%
                                by.x = 'column',
                                by.y = 'column_name')
 
-na_perc[order(-na_perc)] %>% head(10) %>% knitr::kable()
+na_perc[order(-na_perc)] %>% head(15) %>% knitr::kable()
 
 ```
 
-Most variables with high NA coverage are ones for which there exists some sort of "No data/Does not apply" value, but it is not explicitly stated, instead it i left empty  and subsequently read ans an NA by R (which is a reasonable space saving decision.) This means that there is no need to discard most of these variables, since they are easily mapped into the default response 'b' == 'Does not apply 'for categorical variables, and 0 would be appropriate for most numerical variables since those represent costs, payments and counts.
+Most variables with high NA coverage are ones for which there exists some sort of "No data/Does not apply" value, but it is not explicitly stated, instead it is left empty (which is a reasonable space saving decision) and subsequently read as an NA by R. This means that there is no need to discard most of these variables, since they are easily mapped into the default response 'b' == 'Does not apply 'for categorical variables, and 0 would be appropriate for most numerical variables since those represent costs, payments and counts.
 
 ```{r data_imputation}
 numeric_impute <- dictionaries$names[column_type == 'N']$column_name %>%
@@ -506,9 +506,9 @@ na_fill(dt = dat,
 
 ```
 
-Recomputing the valid data coverage metrics, we see much better metric for most variables, only keeping the categorical variables that are not mappable to a 'b' field, and our target variable that we explicitly decided not to impute.
+Recomputing the valid data coverage metrics, we see much better numbers for most variables, only keeping NAs in the 9 categorical variables that are not mappable to a 'b' field, and our target variable that we explicitly decided not to impute.
 
-```{r}
+```{r na_perc_cleansed, echo=TRUE}
 na_perc <- na_percentage(dat) %>% 
   data.table::merge.data.table(y = dictionaries$names[, .(column_name, column_type, description)],
                                by.x = 'column',
@@ -520,7 +520,7 @@ na_perc[na_perc > 0] %>% head(10) %>% knitr::kable()
 
 ## Categorical variable decoding
 
-Now, with all most variables rescued, we can proceed and map them into their true values. We first create the list of categorical variables to be decoded:
+Now, with all most variables filled, we can proceed and map them into their true values. The strategy here is to fetch the values specified in the data dictionary, and rewrite the values of each coded column by reference for the minimum memory overhead possible. We first create the list of categorical variables to be decoded:
 
 ```{r pre_decoding}
 # select the 'C' variables according to the dictionary
@@ -579,15 +579,15 @@ pums <- pums_for_individual_modelling(person_filename = per_fn,
 
 ## Target variable analysis
 
-As we have an explicit target variable, we can center our data exploration in function of the relationship between each variable and our y variable: PINCP. This is a continuous numerical variable, which means we are dealing with a regression problem. We start off by understanding our variable:
+As we have an explicit target variable, we can firts center our data exploration in function of the relationship between each variable and our y variable: PINCP. This is a continuous numerical variable, which means we are dealing with a regression problem. We start off by understanding our variable:
 
 ```{r income_num_summ}
 num_summary(dt = dat, col = 'PINCP') %>% knitr::kable()
 ```
 
-From these statistics, we can see that the variable reaches negative values, which is a valid data entry if the respondent had negative income. There is no documentation on how the PINCP variable is reported or computed (which would also defeat the purpose of this study.), so we have no solid reason to discard those records.
+From these statistics, we can see that the variable reaches negative values, which is a valid data entry if the respondent experienced losses in the study period. There is no no solid reason currently to discard those records.
 
-On the other hand, and as previously pointed out in prior sections, 18% of the PINCP fields are empty, and there are records with 0 assigned to that column, hence it would be reckless to conclude that missing data means zero. We will remove those observations from the data.
+On the other hand, and as previously pointed out in the prior section, 18% of the PINCP fields are empty, and there are records with 0 assigned to that column, hence it would be reckless to conclude that missing data means zero. We will remove those observations from the data.
 
 ```{r remove_income_nas}
 dat <- dat[!is.na(PINCP)]
@@ -597,7 +597,7 @@ We reach then 222,893 valid observations of an individual.
 
 And now we can proceed with visualizing our variable. As expected with income variables, its distribution is heavily asymmetrical, heavily right skewed even after the variable being bounded at 1,166,600.
 
-```{r PINCP_density}
+```{r PINCP_density, fig.width=8}
 chronicle::make_density(dt = dat, value = 'PINCP', static = FALSE)
 ```
 
@@ -620,16 +620,19 @@ income_cor[order(-abs(income_cor))] %>% knitr::kable()
 
 Because most numerical variables are likely to be higher on better-off individuals, it stands to reason that most of them are positively correlated with our income target variable.
 
-We will however remove all components of the PINCP variable present in the training data, since those variables are almost give out an explicit sum to get our target variable, and hence defeat the purpose of the exercise.
+We will however remove all components of the PINCP variable present in the training data (ie all [income categories](https://www.census.gov/programs-surveys/cps/technical-documentation/subject-definitions.html#incomemeasurement)) since those variables give out an explicit sum to get our target variable, and keeping them would defeat the purpose of the exercise.
 
 ```{r discard_wage_earnings_variables}
-dat <- discard_cols(dt = dat, cols = c('PERNP', 'WAGP', 'OIP', 'PAP', 'RETP', 'SEMP', 'SSIP',  'SSP', 'WAGP', 'WKHP'))
+dat <- discard_cols(dt = dat, cols = c('PERNP', 'WAGP', 'OIP', 
+                                       'PAP',  'RETP', 'INTP', 
+                                       'SEMP', 'SSIP', 'SSP', 
+                                       'WAGP', 'WKHP'))
 ```
 
 
-### Consistency within houshold income
+### Consistency within housing unit income
 
-It is also necessary to verify that the household information is consistent with the income of each of its members. The fist check should be to verify that all members of the same housing unit report the same household income.
+It is also necessary to verify that the household income information is consistent with the income of each of its members. The fist check should be to verify that all members of the same housing unit report the same household income.
 
 ```{r check_p_h_income}
 
@@ -640,10 +643,11 @@ data.table::setkey(dat, SERIALNO)
 dat[, .(hu_incomes_reported = uniqueN(HINCP)), by = .(SERIALNO)][hu_incomes_reported > 1]
 ```
 
-This returns an empty query, which means that all housing units have only one housing. Next, we should verify that 
-the individual income makes sense in the context of their housing unit. One might be inclined to verify that every individual's income is smaller than income of the the housing unit it resides, however as we saw in the exploration of our target variable, individual income can be positive, and hence one or more individual's income can be larger than their household's income.
+This returns an empty query, which means that there is only one single value reported for each housing unit.
 
-The correct way to review this consistency is to verify that the sum of the individual incomes is equal to the housing income, including negative incomes 
+Next, we should verify that the individual income makes sense in the context of their housing unit. One might be inclined to verify that every individual's income is smaller than income of the the housing unit it resides, however as we saw in the exploration of our target variable, individual income can be negative, hence one or more individual's income can be larger than their household's income to account for other individual's losses.
+
+The correct way to review this consistency then, is to verify that the sum of the individual incomes is equal to the housing income, including negative incomes 
 
 ```{r}
 income_check <- dat[, .(sum_individual = sum(PINCP), HINCP = unique(HINCP)), 
@@ -652,7 +656,7 @@ income_check <- dat[, .(sum_individual = sum(PINCP), HINCP = unique(HINCP)),
 
 income_check[, .N, consistent][, perc := N/sum(N)][] %>% knitr::kable()
 ```
-We see that roughly 95% of the households have perfectly consistent income reports. For those that do not, we can review how large is the difference. But a quick glance at the summary lets us see that all the inconsistent data is due to imputed missing values, hence the only income value in the inconsistent  households is 0.
+We see that roughly 95% of the households have perfectly consistent income reports. For those that do not, we can review how large is the difference. But a quick glance at the summary lets us see that all the inconsistent data is due to imputed missing values, hence the only income value in all inconsistent  households is 0.
 
 ```{r}
 head(income_check[consistent == FALSE]) %>% knitr::kable()
@@ -676,7 +680,7 @@ dat[, .(sum_individual = sum(PINCP), HINCP = unique(HINCP)),
 
 ## Numerical variables
 
- We can quickly skim through all numerical variables with the skim() function. Categorical variables are also supported by the function, but are omitted to avoid a very large table output.
+ We can now move our attention into the numerical variables generally. The skim() function from the {skimr} package lets us quickly skim through all numerical variables with the skim() function. Categorical variables are also supported by the function, but are omitted to avoid a very large table output.
 
 ```{r skim}
 # create a copy of dat with a snippet of the variable description pasted into each column name
@@ -692,7 +696,7 @@ From this, we can see that most numerical variables are right skewed, which is c
 
 We also want to see the correlation between all variables. Due to the large amount of variables still present, we opt for an interactive heatmap to glance through the data.
 
-```{r num_correlations, fig.width=10, fig.height=8}
+```{r num_correlations, fig.width=8, fig.height=8}
 cor_dat <- cor(keep(dat, is.numeric)) %>% 
   round(2) %>% 
   as.data.table(keep.rownames = TRUE) %>% 
@@ -718,7 +722,7 @@ cor_dat[, x := factor(x, levels = sort(unique(x)))
 
 ## Categorical Variables
 
-For categoricals, a good approach would be visualizing the densities of the target variable for each class, but since we have around 300 categorical variables, it is not feasible to do it on every single one in the given time frame. We manually select a few variables that seem sensible to single out. The variables selected are:
+For categoricals, a good approach would be visualizing the densities of the target variable for each class, but since we have around hundreds of categorical variables, it is not feasible to do it on every single one in the given time frame. We manually select a few variables that seem sensible to single out. The selected variables are:
 
 ```{r categorical_tables, echo=FALSE}
 categoricals_to_explore <- c("HINS4",
@@ -826,7 +830,7 @@ As expected, most of these variables give a clear quantile/median distinction in
 
 # Feature Selection
 
-A good feature selection process should include both subject-matter expertise and sensible statistical behaviors. It also should take into account the use on the model and whether or not it will help perpetuate discrimination over protected groups like ethnicity, gender, nationality, migratory status, religious belief, disability, and so on. Since the purpose of the model was not disclosed as part of the briefing, this type of variables will not be taken into account on the study, and will be explicitly removed from the modeling dataset:
+A good feature selection process should include both subject-matter expertise and sensible statistical behaviors. It also should take into account the use of the model, and whether or not it will help perpetuate discrimination over protected groups like ethnicity, gender, nationality, migratory status, religious belief, disability, and so on. Since the purpose of the model was not disclosed as part of the briefing, this type of variables will not be taken into account on the study, and will be explicitly removed from the modeling dataset:
 
 ```{r, echo=FALSE}
 protected_categories <- c("CIT",
@@ -859,7 +863,7 @@ data.table(protected_categories, description = describe_column(protected_categor
 dat <- discard_cols(dat, protected_categories)
 ```
 
-We can also build hand-picked variables
+We can also build hand-picked variables, which are self-explanatory. We add a count on the NFP to count the respondents themselves along their family members.
 
 ```{r, warning=FALSE, message=FALSE }
 dat[, hu_per_capita_income := HINCP/NP
@@ -869,9 +873,8 @@ dat[, hu_per_capita_income := HINCP/NP
                                      no = (NRC)/(NPF+1))
   ][, rooms_per_person := RMSP/NP 
   ][, bedrooms_per_person := BDSP/NP 
-  ][, perc_commuting_work := JWMNP/WKWN]
+  ][, commute_as_perc_worked := JWMNP/WKWN]
 ```
-
 
 Since we are confident about our data cleansing process, and good data practices from the Census Bureau, we can rely on H2O's randomForest heuristics to drop 'bad columns'. The main reason why a variable might be dropped is it being a categorical variable with a large quantity of distinct values, since ensemble tree models tend to memorize the categories and end up overfitting the data even in a small number of epochs. We will not make outlier treatments since the Bureau already censors extreme values to keep the privacy of the respondents, and since we are going to use a tree based model, feature scaling is not needed.
 
@@ -926,7 +929,7 @@ And we can see there is stability in the cross validation metrics
 rf@model$cross_validation_metrics_summary %>% knitr::kable()
 ```
 
-And we can see that the performance on the unseen data is virtually identical to the cross validation metrics. The model is consistent across unseen data, but the error metrics are not impressive.
+And we can see that the performance on the unseen data is virtually identical to the cross validation metrics. The error metrics seem to be high, however, especially MAE and RSME in context of the income bands we saw through our variable exploration.
 
 ```{r rf1_model_performance}
 # check performance over test set
@@ -975,6 +978,7 @@ aml <- h2o.automl(x = x,
                   seed = 1)
 aml@leaderboard %>% knitr::kable()
 ```
+
 ```{r}
 aml@leader@model$model_summary
 ```
@@ -1010,18 +1014,18 @@ pred_frame[, .(population_size = .N,
                median_relative_error = median(relative_error)),
            by = income_band][order(income_band)] %>% knitr::kable()
 ```
-The model is seeing modestly good results in the upper income bands, but does quite poorly in the lower ones. It is visible that the model had smaller errors on the lower bands, but not enough to overcome the higher penalty that the smaller bands entail in regards to relative error.
+The model is seeing modestly good results in the upper income bands, but does quite poorly in the lower ones. It is visible that the model had smaller absolute errors on the lower bands, but not enough to overcome the higher penalty that the smaller bands entail in regards to relative error.
 
 And to see the performance without evening out good and bad results, we can draw a line in the sand by defining a 'good' result as a predicted value with a relative error below .15, and see the percentage of good results in each income band.
 
 ```{r}
 # flag good predictions
-pred_frame[, good_prediction := relative_error < .2]
+pred_frame[, good_prediction := relative_error < .15]
 
 pred_frame[, .(perc_good_pred = mean(good_prediction)), by = income_band][order(income_band)] %>% knitr::kable()
 ```
 
-In conclusion, our model is modestly competent and stable across the higher positive income bands, while taking a hit on the lower income bands.
+In conclusion, our model is modestly competent and stable across the higher positive income bands, while taking a significant hit on the lower income bands.
 
 To finalize, we proceed to revise which variables the model took into account. We do this by reviewing the model's [variable importance](http://docs.h2o.ai/h2o/latest-stable/h2o-docs/variable-importance.html#:~:text=0%20and%201.-,Variable%20Importance%20Calculation%20(GBM%20%26%20DRF),(decreased)%20as%20a%20result.) ranking.
 
@@ -1033,17 +1037,18 @@ var_importance <- as.data.table(h2o.varimp(rf))[, cumulative_perc := cumsum(perc
 head(var_importance, 10) %>% knitr::kable()
 ```
 
-The model relied heavily in the household and family income, and their respective per-capita approximations. These were expected to be our most robust proxies for the personal income, and then hours worked and age which stands to reason that they will positively influence individual income. 
+The model relied heavily in the household and family income, and their respective per-capita approximations. These were expected to be our most robust proxies for the personal income. Then hours worked, age and property value, which stands to reason that they all will positively correlate with individual income. 
 
 # Closing Thoughts
 
 Overall, we have obtained an interesting baseline for individual income prediction, and with the ACS richness in data, there is a lot of potential to improve upon these current findings. Some suggestions:
 
 *  Cross worked hours with average salaries by occupation to distinguish the value of those hours.
-*  Perform more complex household metrics like the count of different profiles by age, occupation, education level, and so on. For example, count of college educated adults by household.
+*  Perform more complex household metrics like the count of different profiles by age, occupation, education level, and so on. For example, the count and percentage of college educated adults by household.
 *  Use  time of arrival and departure to distinguish night shifts, part-time and freelance jobs. 
 *  Extend training time from minutes to hours.
-*  USe grid search methods for finding optimal forest parameters.
+*  Use grid search methods for finding optimal forest parameters.
+*  Train several models to predict each income separately, and then add their predictions.
 
 # Appendix
 
@@ -1053,7 +1058,7 @@ This package was developed by Philippe Heymans, and aims to provide a seamless e
 
 ## Helper functions
 
-This is a small collection of facilitator functions meant to make the output more readable, and avoid distractions from formatting or complex code.
+This is a small collection of facilitator functions meant to make the output more readable, and avoid distractions from formatting or complex code. With very little effort, these could be built into an R package and have one-liner custom solutions for PUMS data processing.
 
 ```{r helper_functions, eval=FALSE}
 

@@ -17,18 +17,17 @@ options(scipen = 999)
 set.seed(1)
 ```
 
-```{r helper_functions, include=FALSE}
+```{r helper_functions_inv, include=FALSE}
 
 # fetch the column description from the NAME entries of the data dictionary
 describe_column <- function(col = NULL){
   descrip_index <- match(col, dictionaries$names$column_name)
   descr <- dictionaries$names$description[descrip_index]
-  descr[is.na(descr)] <- 'Not on ACS dictionary'
-}
-
-# quickly format percentage without relying on the {scales} package
-fp <- function(x){
-  round(x*100,2) %>% paste0('%')
+  
+  if(any(is.na(descr))){
+    descr[is.na(descr)] <- 'Not on ACS dictionary'
+  }
+  return(descr)
 }
 
 # run summary statistics over a numerical column of a data.table (optionally grouped)
@@ -45,16 +44,9 @@ num_summary <- function(dt, col, by = NULL){
                mean = mean(value, na.rm = TRUE),
                sd = sd(value, na.rm = TRUE),
                min = min(value, na.rm = TRUE),
-               percentile.1 = quantile(value, 0.1, na.rm = TRUE),
-               percentile.2 = quantile(value, 0.2, na.rm = TRUE),
-               percentile.3 = quantile(value, 0.3, na.rm = TRUE),
-               percentile.4 = quantile(value, 0.4, na.rm = TRUE),
-               percentile.5 = quantile(value, 0.5, na.rm = TRUE),
-               percentile.6 = quantile(value, 0.6, na.rm = TRUE),
-               percentile.7 = quantile(value, 0.7, na.rm = TRUE),
-               percentile.8 = quantile(value, 0.8, na.rm = TRUE),
-               percentile.9 = quantile(value, 0.9, na.rm = TRUE),
-               percentile.95 = quantile(value, 0.95, na.rm = TRUE),
+               percentile.25 = quantile(value, 0.25, na.rm = TRUE),
+               percentile.50 = quantile(value, 0.5, na.rm = TRUE),
+               percentile.75 = quantile(value, 0.75, na.rm = TRUE),
                percentile.975 = quantile(value, 0.975, na.rm = TRUE),
                percentile.99 = quantile(value, 0.99, na.rm = TRUE),
                max = max(value, na.rm = TRUE)),
@@ -65,13 +57,6 @@ num_summary <- function(dt, col, by = NULL){
   
   return(summ)
 }
-
-# compute pearson correlation while skipping NAs in the y vector
-cor_na.rm <- function(x,y){
-  na_index <- is.na(y)
-  cor(x[!na_index], y[!na_index])
-}
-
 
 # compute the count and percentage of missing entries for each column of a data.frame 
 na_percentage <- function(dt){
@@ -133,9 +118,23 @@ parse_dictionaries <- function(dict_filename){
   return(dictionaries)
 }
 
+# decode categorical columns with the values provided in the VAL dictionary.
+decode_categoricals <- function(col, dat){
+  # select the dictionary entries speciying column values
+  column_mapping <- dictionaries$values[column_name %chin% col & starting_value == ending_value,
+                                        .(starting_value, description)] %>% 
+    data.table::setkey(starting_value)
+  
+  # data.table 'left join' by reference
+  # technically this is a mutate by reference, not a join
+  matching_statement <- paste0(col, '==', 'starting_value')
+  setkeyv(dat, col)
+  dat[column_mapping, on = matching_statement, (col) := i.description]
+}
+
 pums_for_individual_modelling <- function(person_filename,
-                                         housing_unit_filename,
-                                         dictionary_filename){
+                                          housing_unit_filename,
+                                          dictionary_filename){
 
   tictoc::tic('PUMS files successfully parsed')
   # 0. load and join data ---
@@ -158,7 +157,10 @@ pums_for_individual_modelling <- function(person_filename,
   data.table::setkeyv(hu,  join_cols)
   
   # data.table left join
-  dat <- data.table::merge.data.table(x = per, hu, all.x = TRUE)
+  pums <- data.table::merge.data.table(x = per, hu, all.x = TRUE)
+  
+  character_cols <- dictionaries$names[column_type == 'C']$column_name %>% intersect(colnames(dat))
+  pums[, (character_cols) := purrr::map(.SD, as.character), .SDcols = character_cols]
   
   # remove the separate tables from memory
   rm(per)
@@ -167,34 +169,34 @@ pums_for_individual_modelling <- function(person_filename,
   # 1. discard columns ----
   
   # weight columns
-  dat <- discard_cols(dt = dat, cols = c('^WGTP', '^PWGTP'), regex = TRUE)
+  pums <- discard_cols(dt = pums, cols = c('^WGTP', '^PWGTP'), regex = TRUE)
   
   # flag columns
   flag_columns <- dictionaries$names[str_detect(description, 'allocation flag')]
-  dat <- discard_cols(dt = dat, cols = flag_columns, regex = TRUE)
+  pums <- discard_cols(dt = pums, cols = flag_columns, regex = TRUE)
   
   # constant_columns
-  unique_values <- data.table(column = colnames(dat),
-                              unique_values = purrr::map_int(dat, uniqueN)
+  unique_values <- data.table(column = colnames(pums),
+                              unique_values = purrr::map_int(pums, uniqueN)
                               )[unique_values == 1]
   
-  dat <- discard_cols(dt = dat, cols = unique_values$column)
+  pums <- discard_cols(dt = pums, cols = unique_values$column)
   
   # 2. data imputation ----
   numeric_impute <- dictionaries$names[column_type == 'N']$column_name %>%
-    intersect(colnames(dat)) %>% 
+    intersect(colnames(pums)) %>% 
     setdiff('PINCP') # our target variable deserves special consideration 
   
-  na_fill(dt = dat,  
+  na_fill(dt = pums,  
           cols = numeric_impute,
           replacement = 0)
   
   # for categoricals, only the variables that have an explicit 'b' = 'Does not apply' field will be replaced.
   categorical_impute <- dictionaries$names[column_type == 'C']$column_name %>%
-    intersect(colnames(dat)) %>% 
+    intersect(colnames(pums)) %>% 
     intersect(dictionaries$values[column_type == 'C' & starting_value == 'b']$column_name)
   
-  na_fill(dt = dat,  
+  na_fill(dt = pums,  
           cols = categorical_impute,
           replacement = 'b')
   
@@ -208,37 +210,21 @@ pums_for_individual_modelling <- function(person_filename,
   # These are c("SERIALNO", "SERIALNO", "PUMA", "MIGPUMA", "POWPUMA", "RACNUM")
   exclude_from_decoding <- 
     dictionaries$values[column_type %chin% 'C' & starting_value != ending_value]$column_name
-  columns_to_decode %<>% 
-    setdiff(exclude_from_decoding) 
   
-  # and remove the columns we already removed from the dataset
-  columns_to_decode %<>% 
-    intersect(colnames(dat))
+  columns_to_decode %<>% setdiff(exclude_from_decoding) 
+  
+  # and remove the columns we already removed from the dataaset
+  columns_to_decode %<>% intersect(colnames(pums))
   
   # set all categorical variables as character vectors to avoid type inconsistencies 
-  dat[, (columns_to_decode) := purrr::map(.SD, as.character), .SDcols = columns_to_decode]
+  pums[, (columns_to_decode) := purrr::map(.SD, as.character), .SDcols = columns_to_decode]
   
-  columns_to_decode %>% walk(decode_categoricals, dat = dat)
+  columns_to_decode %>% walk(decode_categoricals, dat = pums)
   
   tictoc::toc()
   
-  return(dat)
+  return(pums[])
 }
-
-# decode categorical columns according to the values dictionary
-decode_categoricals <- function(col, dat){
-  # select the dictionary entries speciying column values
-  column_mapping <- dictionaries$values[column_name %chin% col & starting_value == ending_value,
-                                        .(starting_value, description)] %>% 
-    data.table::setkey(starting_value)
-  
-  # data.table 'left join' by reference
-  # technically this is a mutate by reference, not a join
-  matching_statement <- paste0(col, '==', 'starting_value')
-  setkeyv(dat, col)
-  dat[column_mapping, on = matching_statement, (col) := i.description]
-}
-
 
 # create a new column marking the value band of each observation wrt a continuous column 
 discretize_column <- function(dt,
@@ -268,7 +254,6 @@ discretize_column <- function(dt,
   
   dt[, (bands_column_name) := factor(x = get(bands_column_name), levels = band_names)]
 }
-
 
 ```
 
@@ -307,7 +292,7 @@ library(skimr)
 
 ## Data dictionary parsing
 
-To get a better understanding of the data, we proceed to map the PUMS variable names to their corresponding descriptions. The parsing of the data dictionary was rather troublesome, since the ACS houses two record types carelessly braided into the same .csv file:
+To get a better understanding of the data, we proceed to map the PUMS variable names to their corresponding descriptions. The parsing of the data dictionary was rather troublesome, since the ACS houses two record types carelessly braided together on the same .csv file:
 
 -   The specification for each field, which comprises 5 values:
 
@@ -327,7 +312,7 @@ To get a better understanding of the data, we proceed to map the PUMS variable n
 6.  Ending Value (last element of the value range).
 7.  Description.
 
-This makes the VAL record type a more complete mapping of the content of the data, but the NAME record type is easier to quickly check. We parse them both separately into a list.
+This makes the VAL record type a more complete mapping of the content of the data, but the NAME record type is more prectical for quick checks. We parse them both separately into a list.
 
 ```{r dictionary_parsing}
 dict_filename <- 'Technical Test Data and Information/PUMS_Data_Dictionary_2019.csv'
@@ -352,7 +337,7 @@ dictionaries <- readr::read_lines(dict_filename) %>%
                                                .x)))
 ```
 
-Additionally, a mark for the dataset was added. The first variable of the Person dataset is SPORDER, so any entry before it belongs to the Housing Unit data.
+Additionally, a mark was added to point if the variable belongs to the Person or the Housing Unit dataset. The first variable of the Person dataset is SPORDER, so any entry before it belongs to the Housing Unit data.
 
 ```{r dict_mark_h_or_p}
 # find the index of SPORDER in both the $names and $values tables
@@ -388,6 +373,9 @@ knitr::kable(head(dictionaries$names))
 knitr::kable(head(dictionaries$values))
 ```
 
+These description fields do not give details regarding methodology nor definitions, for the latter there are the [US Census Bureau subject definitions](https://www.census.gov/programs-surveys/cps/technical-documentation/subject-definitions.html).
+
+
 And for future convenience, this process can be packaged into a single call:
 
 ```{r}
@@ -400,7 +388,13 @@ str(object = dicts, give.atr = F, level = 2, vec.len = 2)
 
 ## Data Loading and joining
 
-We load both datasets into memory. We need to take no memory considerations because the data is rather small. We remove the 'RT' column because it is on both files but with different values for the same serial numbers, so it would obtruse the join process.
+At 253MB (70MB + 183MB), this dataset should not present issues on any reasonably modern hardware setup, and that is precisely the reason why the PUMS dataset exists. Since the PUMS files are a 1% random sampling of the full state dataset, and assuming reasonable stability in the size of the fields, the size of the full dataset would range around 25GB. This would indubitably would be quite more demanding, but still not enough to be a limiting factor of the steps carried out in this particular study. 
+
+If this was a national study done with the full ACS dataset instead of a Texas-focused PUMS study, then the size of the raw dataset would indeed be a limiting factor, and loading the entire dataset into memory would not be feasible on consumer-grade hardware. Supposing that it is not worth it to load the dataset into a distributed filesystem setup, the healthier approach would be to start discarding portions of the data that would not be used in the model. If discarding all those columns was not enough for the full dataset, then performing a sample of the data could suffice to diagnose, re-structure and calibrate the desired model. However, assuring a representative sampling can potentially be more time consuming than the study itself.
+
+Feature selection will be performed further on, but these will be motivated by good statistical practices, not by data size problems. 
+
+We will load both datasets into memory. The column 'RT' is discarded because it is an indicator of the dataset, P for Person and H for Housing Unit, wich will become meaningless once we merge both files.
 
 ```{r load_data}
 # load person data
@@ -433,17 +427,16 @@ rm(per)
 rm(hu)
 
 # map all character variables as.character:
-
-# select columns that are specified as character columns in the dictionary 
+# first, get all the column names in the dictionary that correspond to 'C' column types. 
 character_cols <- dictionaries$names[column_type == 'C']$column_name %>% intersect(colnames(dat))
 
-# coerce to character by reference
+# and then coerce all of them to character by reference
 dat[, (character_cols) := purrr::map(.SD, as.character), .SDcols = character_cols]
 ```
 
 ## Column discarding
 
-The joint table comprehends 517 variables, but we can quickly reduce the size of the dataset with three simple ideas:
+The joint table comprehends 517 variables, but we can quickly reduce the width of the dataset with three simple ideas:
 
 -   Over 100 of those columns are weight values for computing representative aggregates, which is not part of the scope of this study.
 
@@ -458,7 +451,7 @@ flag_columns <- dictionaries$names[str_detect(description, 'allocation flag')]$c
 dat <- discard_cols(dt = dat, cols = flag_columns, regex = TRUE)
 ```
 
--   We could remove columns with a single constant value.
+-   We can remove columns that have a single constant value.
 
 ```{r remove_constant_columns}
 unique_values <- data.table(column = colnames(dat),
@@ -475,11 +468,11 @@ As expected, these columns mostly correspond to geographical entries that are al
 dat <- discard_cols(dt = dat, cols = unique_values$column)
 ```
 
-With that, we went from 517 to 218 variables, a much more manageable amount of columns to consider. We can now proceed to decode all categorical variables. The strategy here is to fetch the values specified in the data dictionary, and rewrite the values of each column by reference for the minimum memory overhead possible.
+With that, we went from 517 to 218 variables, a much more manageable amount of columns to consider in our model. We can now proceed to decode all categorical variables: the strategy here is to fetch the values specified in the data dictionary, and rewrite the values of each column by reference for the minimum memory overhead possible.
 
 ## Valid data coverage
 
-Let's proceed examining the percentage of valid data of all the other variables.
+Let us first examining the percentage of valid data of all the other variables.
 
 ```{r}
 na_perc <- na_percentage(dat) %>% 
@@ -491,7 +484,7 @@ na_perc[order(-na_perc)] %>% head(10) %>% knitr::kable()
 
 ```
 
-Most variables with high NA coverage are ones where there exists a field for "No data/Does not apply" but it is not explicitly stated, instead it is read as an NA (which is a reasonable space saving decision.) But that means that there is no need to discard most of these variables they are easily mapped into the default response 'b' == 'Does not apply 'for categorical variables, and 0 would be appropriate for most numerical variables since those represent costs, payments and counts.
+Most variables with high NA coverage are ones for which there exists some sort of "No data/Does not apply" value, but it is not explicitly stated, instead it i left empty  and subsequently read ans an NA by R (which is a reasonable space saving decision.) This means that there is no need to discard most of these variables, since they are easily mapped into the default response 'b' == 'Does not apply 'for categorical variables, and 0 would be appropriate for most numerical variables since those represent costs, payments and counts.
 
 ```{r data_imputation}
 numeric_impute <- dictionaries$names[column_type == 'N']$column_name %>%
@@ -513,7 +506,7 @@ na_fill(dt = dat,
 
 ```
 
-Recomputing the valid data coverage metrics, we see much better metric for most variables, only keeping the categorical variables that are not mappable to a 'b' field, and our target variable that we decided not to impute.
+Recomputing the valid data coverage metrics, we see much better metric for most variables, only keeping the categorical variables that are not mappable to a 'b' field, and our target variable that we explicitly decided not to impute.
 
 ```{r}
 na_perc <- na_percentage(dat) %>% 
@@ -530,22 +523,21 @@ na_perc[na_perc > 0] %>% head(10) %>% knitr::kable()
 Now, with all most variables rescued, we can proceed and map them into their true values. We first create the list of categorical variables to be decoded:
 
 ```{r pre_decoding}
-# select the categorical variables according to the dictionary
+# select the 'C' variables according to the dictionary
 columns_to_decode <- dictionaries$names[column_type %chin% 'C']$column_name 
 
 # do not decode range categorical variables (ie where starting_value != ending_value)
-# These are c("SERIALNO", "SERIALNO", "PUMA", "MIGPUMA", "POWPUMA", "RACNUM")
+# These are c("SERIALNO", "SPORDER", "PUMA", "MIGPUMA", "POWPUMA", "RACNUM")
 exclude_from_decoding <- 
   dictionaries$values[column_type %chin% 'C' & starting_value != ending_value]$column_name
-columns_to_decode %<>% 
-  setdiff(exclude_from_decoding) 
 
-# and remove the columns we already removed from the dataset
-columns_to_decode %<>% 
-  intersect(colnames(dat))
+columns_to_decode %<>% setdiff(exclude_from_decoding) 
+
+# and of course, decode only the columns that are still present in the data
+columns_to_decode %<>% intersect(colnames(dat))
 ```
 
-The following function then rewrites the content of all coded columns into their explicit values (eg, for the 'AGS' column (Sales of Agriculture Products): the value '1' will be changed to 'None', '2' will be changed to '\$1 - \$999', and so on.)
+The following function then rewrites the content of all coded columns into their explicit values. For example, for the 'AGS' column (Sales of Agriculture Products): the value '1' will be changed to 'None', '2' will be changed to '\$1 - \$999', and so on.
 
 ```{r, variable_decoding}
 # and define a function that decodes a column
@@ -568,7 +560,7 @@ columns_to_decode %>% walk(decode_categoricals, dat = dat)
 tictoc::toc()
 ```
 
-On this execution time, the function was able to compute the mappings of all 169 coded columns, rewriting over the same pointers which also means no memory overhead.
+On this execution time, the function was able to compute the mappings of all 169 coded columns, rewriting over the same pointers which also means a very minimal memory overhead.
 
 With this final step, not only do we have a workable data file that needs no external reference (besides column names, whose descriptions are too long to use as column names directly), but this also can be wrapped into into a single function, allowing us to efficiently parse all past and future PUMS files that follow the same structure.
 
@@ -577,28 +569,13 @@ per_fn <- 'Technical Test Data and Information/psam_p48.csv'
 hu_fc <- 'Technical Test Data and Information/psam_h48.csv'
 dict_filename <- 'Technical Test Data and Information/PUMS_Data_Dictionary_2019.csv'
 
-datt <- pums_for_individual_modelling(person_filename = per_fn,
-                                     housing_unit_filename = hu_fc,
-                                     dictionary_filename = dict_filename)
+pums <- pums_for_individual_modelling(person_filename = per_fn,
+                                      housing_unit_filename = hu_fc,
+                                      dictionary_filename = dict_filename)
 ```
 
 # Exploratory data analysis
 
-## Skim through the data
-
-We proceed to examine our processed table. We can quickly skim through all numerical variables with the skim() function. Categorical variables were omitted to avoid a very large table output.
-
-```{r skim}
-# create a copy of dat with a snippet of the variable description pasted into each column name
-dat_with_descriptions <- data.table::copy(dat)
-desc_index <- match(colnames(dat), dictionaries$names$column_name)
-desc_colnames <- paste0(colnames(dat), ': ', str_sub(dictionaries$names$description[desc_index],1,30))
-colnames(dat_with_descriptions) <- desc_colnames
-
-skimr::skim(keep(dat_with_descriptions, is.numeric))
-```
-
-From this, we can see that most numerical variables are right skewed, which is consistent with the imputation process assigning them 0 on all their missing data fields. This, however, is also consistent with the interpretation of the variables, so it is not considered data distortion as much as it is data completion.
 
 ## Target variable analysis
 
@@ -641,15 +618,79 @@ income_cor <- data.table(column_name = nums,
 income_cor[order(-abs(income_cor))] %>% knitr::kable()
 ```
 
-## Numerical variables
+Because most numerical variables are likely to be higher on better-off individuals, it stands to reason that most of them are positively correlated with our income target variable.
 
-Because most numerical variables are likely to be higher on better-off individuals, it stands to reason that most of them are positively correlated with our income target variable. We will however remove 'PERNP', 'WAGP', since those two variables are almost explicitly our target variable and defeats the purpose of the exercise.
+We will however remove all components of the PINCP variable present in the training data, since those variables are almost give out an explicit sum to get our target variable, and hence defeat the purpose of the exercise.
 
 ```{r discard_wage_earnings_variables}
-dat <- discard_cols(dt = dat, cols = c('PERNP', 'WAGP'))
+dat <- discard_cols(dt = dat, cols = c('PERNP', 'WAGP', 'OIP', 'PAP', 'RETP', 'SEMP', 'SSIP',  'SSP', 'WAGP', 'WKHP'))
 ```
 
-We also want to see the correlation between all other variables. Due to the large amount of variables still present, we opt for an interactive heatmap to glance through the data.
+
+### Consistency within houshold income
+
+It is also necessary to verify that the household information is consistent with the income of each of its members. The fist check should be to verify that all members of the same housing unit report the same household income.
+
+```{r check_p_h_income}
+
+# set key for faster group statistics
+data.table::setkey(dat, SERIALNO)
+
+# query all housing units with more than 1 HINCP reported
+dat[, .(hu_incomes_reported = uniqueN(HINCP)), by = .(SERIALNO)][hu_incomes_reported > 1]
+```
+
+This returns an empty query, which means that all housing units have only one housing. Next, we should verify that 
+the individual income makes sense in the context of their housing unit. One might be inclined to verify that every individual's income is smaller than income of the the housing unit it resides, however as we saw in the exploration of our target variable, individual income can be positive, and hence one or more individual's income can be larger than their household's income.
+
+The correct way to review this consistency is to verify that the sum of the individual incomes is equal to the housing income, including negative incomes 
+
+```{r}
+income_check <- dat[, .(sum_individual = sum(PINCP), HINCP = unique(HINCP)), 
+                    keyby = SERIALNO
+                  ][, consistent := sum_individual == HINCP]
+
+income_check[, .N, consistent][, perc := N/sum(N)][] %>% knitr::kable()
+```
+We see that roughly 95% of the households have perfectly consistent income reports. For those that do not, we can review how large is the difference. But a quick glance at the summary lets us see that all the inconsistent data is due to imputed missing values, hence the only income value in the inconsistent  households is 0.
+
+```{r}
+head(income_check[consistent == FALSE]) %>% knitr::kable()
+income_check[consistent == FALSE]$HINCP %>% unique()
+```
+
+We can then use the computed summary to correct these missing values with their true values
+
+```{r}
+dat[income_check, on = 'SERIALNO == SERIALNO', HINCP := i.sum_individual]
+```
+And repeating the same query, we see now that 100% of the housing unit income observations are consistent
+
+```{r}
+dat[, .(sum_individual = sum(PINCP), HINCP = unique(HINCP)), 
+                    keyby = SERIALNO
+  ][, consistent := sum_individual == HINCP
+  ][, .N, consistent][, perc := N/sum(N)][] %>%  knitr::kable()
+```
+
+
+## Numerical variables
+
+ We can quickly skim through all numerical variables with the skim() function. Categorical variables are also supported by the function, but are omitted to avoid a very large table output.
+
+```{r skim}
+# create a copy of dat with a snippet of the variable description pasted into each column name
+dat_with_descriptions <- data.table::copy(dat)
+desc_index <- match(colnames(dat), dictionaries$names$column_name)
+desc_colnames <- paste0(colnames(dat), ': ', str_sub(dictionaries$names$description[desc_index],1,30))
+colnames(dat_with_descriptions) <- desc_colnames
+
+skimr::skim(keep(dat_with_descriptions, is.numeric))
+```
+
+From this, we can see that most numerical variables are right skewed, which is consistent with the imputation process assigning them 0 on all their missing data fields. This, however, is also consistent with the interpretation of the variables, so it is not considered data distortion as much as it is data completion.
+
+We also want to see the correlation between all variables. Due to the large amount of variables still present, we opt for an interactive heatmap to glance through the data.
 
 ```{r num_correlations, fig.width=10, fig.height=8}
 cor_dat <- cor(keep(dat, is.numeric)) %>% 
@@ -706,7 +747,7 @@ We then proceed to make box plots of all the selected variables. Because PINCP h
 categorical_plots <- categoricals_to_explore %>% 
   purrr::map2(.x = categoricals_to_explore, 
               .y = describe_column(categoricals_to_explore), 
-              .f = ~chronicle::make_boxplot(dt = dat[PINCP < 150000, .(PINCP, (.x) = get(.x))],
+              .f = ~chronicle::make_boxplot(dt = dat[PINCP < 150000],
                                             value = 'PINCP', 
                                             groups = .x,
                                             jitter = FALSE, 
@@ -781,7 +822,7 @@ categorical_plots$TEN
 categorical_plots$WKL
 ```
 
-As expected, most of these variables give a clear quantile/median distinction in regards to the individual income. These variables were chosen because they are proxies for poverty/quality of life, and have few distinct values to comfortably be visualized.
+As expected, most of these variables give a clear quantile/median distinction in regards to the individual income. These variables were chosen because they are proxies for poverty/quality of life, and have few distinct values to be comfortably visualized.
 
 # Feature Selection
 
@@ -796,6 +837,8 @@ protected_categories <- c("CIT",
                           "DIS",
                           "HISP",
                           "NATIVITY",
+                          "ANC1P",
+                          "ANC2P", 
                           "RAC1P",
                           "RAC2P",
                           "RAC3P",
@@ -812,28 +855,42 @@ protected_categories <- c("CIT",
 data.table(protected_categories, description = describe_column(protected_categories)) %>% knitr::kable()
 ```
 
+```{r}
+dat <- discard_cols(dat, protected_categories)
+```
+
 We can also build hand-picked variables
 
-```{r}
-dat[, hu_per_capita_income := HINCP/NP]
+```{r, warning=FALSE, message=FALSE }
+dat[, hu_per_capita_income := HINCP/NP
+  ][, fam_per_capita_income := FINCP/(NPF+1)
+  ][, fam_children_percentage := fifelse(test = AGEP < 18, 
+                                     yes = (NRC+1)/(NPF+1),
+                                     no = (NRC)/(NPF+1))
+  ][, rooms_per_person := RMSP/NP 
+  ][, bedrooms_per_person := BDSP/NP 
+  ][, perc_commuting_work := JWMNP/WKWN]
 ```
 
-```{r, echo=FALSE}
-dat <-  <- (dt = dat,
-                    cols =  protected_categories)
-```
 
-Since we are confident about our data cleansing process, and good data health from ACS practices, we can rely on H2O's randomForest heuristics to drop 'bad columns'. The main reason why a variable might be dropped is it being a categorical variable with a large quantity of distinct values, since ensemble tree models tend to memorize the categories and end up overfitting the data even in a small number of epochs.
+Since we are confident about our data cleansing process, and good data practices from the Census Bureau, we can rely on H2O's randomForest heuristics to drop 'bad columns'. The main reason why a variable might be dropped is it being a categorical variable with a large quantity of distinct values, since ensemble tree models tend to memorize the categories and end up overfitting the data even in a small number of epochs. We will not make outlier treatments since the Bureau already censors extreme values to keep the privacy of the respondents, and since we are going to use a tree based model, feature scaling is not needed.
 
-We first setup a local H2O cluster, allocate it 10GB of RAM and split the data into a train and testing set. The training will be done with cross validation, but we stil want to test its performance on unseen data.
+
+# Modelling
+
+## H2O local cluster setup
+
+We first setup a local H2O cluster, allocate it 16GB of RAM and split the data into a train and testing set. The training will be done with cross validation, but we stil want to test its performance on unseen data.
+
 
 ```{r h2o_setup, warning=FALSE, message=FALSE}
 library(h2o)
 
 #set up the H2O local cluster
 h2o.init(max_mem_size = '16G') # allocating 16GB of RAM
+h2o.no_progress() # disable progress bars
 
-# feed all variables to the model
+# feed all variables to the model (except indexes and the target variable)
 x <- setdiff(colnames(dat), c('PINCP', 'SERIALNO', 'SPORDER'))
 y <- 'PINCP'
 
@@ -843,14 +900,13 @@ model_dat <- as.h2o(dat)
 dat_split <- h2o.splitFrame(data = model_dat, ratios = 0.8, seed = 1)
 train <- dat_split[[1]]
 test <- dat_split[[2]]
-
 ```
 
 Then we start off with a random forest model with H2O's very reasonable preset values (ntrees = 50, max_depth = 20, nbins = 20, no early stopping)
 
-# Model calibration
+## Initial model
 
-```{r rf, warning=FALSE, message=FALSE}
+```{r rf, message=FALSE, warning=FALSE}
 # build a cross validated model
 rf <- h2o.randomForest(x = x,
                        y = y,
@@ -867,23 +923,74 @@ rf@model$model_summary %>% knitr::kable()
 And we can see there is stability in the cross validation metrics
 
 ```{r}
-rf@model$cross_validation_metrics_summary
+rf@model$cross_validation_metrics_summary %>% knitr::kable()
 ```
 
-And we can see that the performance on the unseen data is basically identical to the cross validation metrics
+And we can see that the performance on the unseen data is virtually identical to the cross validation metrics. The model is consistent across unseen data, but the error metrics are not impressive.
 
-```{r model_performance}
+```{r rf1_model_performance}
 # check performance over test set
 rf@model$cross_validation_metrics
 h2o.performance(model = rf, newdata = test)
 ```
 
-While MAE and RMSE give an idea of the range of values that might be predicted, they are not ideal to understand the fit for different income bands, since being 11,000 USD off means quite different things for people in the first vs last quintiles. Hence we propose using the median relative error to see the overall performance across different income bands.
+## Second model
+
+We will try to improve the model by letting it fit the data with deeper trees and more run time.
+
+```{r, warning=FALSE, message=FALSE}
+rf <- h2o.randomForest(x = x,
+                       y = y,
+                       training_frame = train,
+                       nfolds = 10, 
+                       max_runtime_secs = 600, 
+                       seed = 1, 
+                       max_depth = 30)
+
+rf@model$model_summary %>% knitr::kable()
+```
+
+```{r rf2_model_performance}
+# check performance over test set
+rf@model$cross_validation_metrics
+h2o.performance(model = rf, newdata = test)
+```
+This does not yield significant improvements, and the scoring history suggests that the performance may not improve 
+without extensive training time, time that is not available for this delivery.
+
+```{r}
+rf@model$scoring_history %>% knitr::kable()
+```
+
+## Brute forcing throur H2O's AutoML
+
+We can then review if the limiting factor is the models/training time available by letting H2O's autoML function seek for an optimal model
+
+```{r aml, warning=FALSE, message=FALSE}
+aml <- h2o.automl(x = x,
+                  y = y,
+                  training_frame = train,
+                  nfolds = 10, 
+                  max_runtime_secs = 600, 
+                  seed = 1)
+aml@leaderboard %>% knitr::kable()
+```
+```{r}
+aml@leader@model$model_summary
+```
+
+While the model complexity skyrockets, the performance metrics do not show an improvement meaningful enough to justify its additional complexity. We can then conclude that to improve the model, we would need to improve the feature engineering process, or reincorporate some income variables to use as proxies for our final goal. 
+
+We then proceed finishing the model performance analysis with our random forest. 
+
+## Contextualizing the error metrics
+
+While MAE and RMSE give an idea of the range of values that might be predicted, they are not ideal to understand the fit for different income bands, since being 17,000 USD off means quite different things for people in the first vs last quintiles. Hence we propose using the median relative error to see the overall performance across different income bands.
 
 ```{r prediction}
 # predict over the test set
 pred <- h2o.predict(object = rf, 
-                   newdata = test)
+                    newdata = test)
 
 # compute relative error for each observation
 pred_frame <- cbind(as.data.table(test)[, .(PINCP)],
@@ -891,30 +998,32 @@ pred_frame <- cbind(as.data.table(test)[, .(PINCP)],
                     )[, absolute_error := abs(predict-PINCP)
                     ][, relative_error := absolute_error/PINCP]
 
-# check the performance in each quintile
+# create a grouping column for income quintiles
 discretize_column(dt = pred_frame,
                   amount_column = 'PINCP',
                   band_cuts = quantile(pred_frame$PINCP, probs = seq(0, 1, .2)), 
                   bands_column_name = 'income_band')
 
+# check the performance in each quintile
 pred_frame[, .(population_size = .N,
                median_absolute_error = median(absolute_error),
                median_relative_error = median(relative_error)),
            by = income_band][order(income_band)] %>% knitr::kable()
 ```
+The model is seeing modestly good results in the upper income bands, but does quite poorly in the lower ones. It is visible that the model had smaller errors on the lower bands, but not enough to overcome the higher penalty that the smaller bands entail in regards to relative error.
 
 And to see the performance without evening out good and bad results, we can draw a line in the sand by defining a 'good' result as a predicted value with a relative error below .15, and see the percentage of good results in each income band.
 
 ```{r}
 # flag good predictions
-pred_frame[, good_prediction := relative_error < .20]
+pred_frame[, good_prediction := relative_error < .2]
 
-pred_frame[, .(perc_good_pred = mean(good_prediction)), by = income_band]
+pred_frame[, .(perc_good_pred = mean(good_prediction)), by = income_band][order(income_band)] %>% knitr::kable()
 ```
 
-In conclusion, our model is markedly competent and stable across the different positive income bands.
+In conclusion, our model is modestly competent and stable across the higher positive income bands, while taking a hit on the lower income bands.
 
-Now, we proceed to revise which variables the model took into account. We do this by reviewing the model's [variable importance](http://docs.h2o.ai/h2o/latest-stable/h2o-docs/variable-importance.html#:~:text=0%20and%201.-,Variable%20Importance%20Calculation%20(GBM%20%26%20DRF),(decreased)%20as%20a%20result.) ranking.
+To finalize, we proceed to revise which variables the model took into account. We do this by reviewing the model's [variable importance](http://docs.h2o.ai/h2o/latest-stable/h2o-docs/variable-importance.html#:~:text=0%20and%201.-,Variable%20Importance%20Calculation%20(GBM%20%26%20DRF),(decreased)%20as%20a%20result.) ranking.
 
 ```{r}
 var_importance <- as.data.table(h2o.varimp(rf))[, cumulative_perc := cumsum(percentage)
@@ -924,9 +1033,17 @@ var_importance <- as.data.table(h2o.varimp(rf))[, cumulative_perc := cumsum(perc
 head(var_importance, 10) %>% knitr::kable()
 ```
 
-These all are reasonably related to personal income: some of them explicitly state incomes (retirement, self-employment) while others relate to the stage of the traditional life cycle of the individual (age, vehicle occupancy).
+The model relied heavily in the household and family income, and their respective per-capita approximations. These were expected to be our most robust proxies for the personal income, and then hours worked and age which stands to reason that they will positively influence individual income. 
 
-Overall, we have obtained a
+# Closing Thoughts
+
+Overall, we have obtained an interesting baseline for individual income prediction, and with the ACS richness in data, there is a lot of potential to improve upon these current findings. Some suggestions:
+
+*  Cross worked hours with average salaries by occupation to distinguish the value of those hours.
+*  Perform more complex household metrics like the count of different profiles by age, occupation, education level, and so on. For example, count of college educated adults by household.
+*  Use  time of arrival and departure to distinguish night shifts, part-time and freelance jobs. 
+*  Extend training time from minutes to hours.
+*  USe grid search methods for finding optimal forest parameters.
 
 # Appendix
 
@@ -934,59 +1051,21 @@ Overall, we have obtained a
 
 This package was developed by Philippe Heymans, and aims to provide a seamless experience while building sophisticated and interactive visualizations in R, handling most of their challenges though its collection of helper functions. For further detail, please visit its [github page](https://github.com/pheymanss/chronicle).
 
-## Exercise-structured answers
-
-As consideration to the audience, this report is presented as a product delivery instead of homework. This section however, provides a Q&A structure based on the Technical Test Specs provided.
-
-#### 1. If the data is too large for the analysis, what will you do to reduce the size of the data, or work with the full dataset? Explain the steps you used.
-
-R/. At 253MB (70MB + 183MB), this dataset should not present issues on any reasonably modern hardware setup, and that is precisely the reason why the PUMS dataset exists. Assuming reasonable stability in the size of the fields, the size of the full dataset would range around 25GB, which would be quite more demanding, but still not enough to be a limiting factor of the steps carried out in this particular study. (Mostly automatic) feature selection methods were used, but those were motivated by good statistical practices, not data size problems. A uausl quick win is to identify columns that are immediately irrelevant to the problem at hand (eg, sample weights and allocation flags), which let us go from 500 to 200 variables without sacrificing a thing.
-
-If this was a national study done with the full ACS dataset instead of a Texas-focused study with a 1% sample, then the size of the raw dataset would indeed be a limiting factor, and loading the entire dataset into memory would not be feasible on consumer-grade hardware. Supposing that it is not worth it to load the dataset into a distributed filesystem setup, the healthier approach would be to start discarding portions of the data that would not be used in the model. If discarding all those columns was not enough for the full dataset, then performing a sample of the data could suffice to diagnose, re-structure and calibrate the desired model. However, assuring a representative sampling can potentially be more time consuming than the study itself.
-
-#### 2. How will you double-check the individual's income in a household against the overall household income?
-
-```{r check_p_h_income}
-dat[!is.na(HINCP), .(PINCP, HINCP)]
-dat[PINCP > HINCP, .(PINCP, HINCP)]
-```
-
-#### 3. What data makes sense to use as potential features for a model, and which data does not?
-
-#### 4. What data cleansing techniques did you use and why?
-
-#### 5. Prepare your data for model development, explaining the steps you used for that preparation.
-
-#### 6. Make sure to document all of the steps you used for building the model(s).
-
-#### 7. Include any relevant metrics that you use to determine if the model is acceptable or not.
-
-#### 8. Be ready to defend your results. It is fine if you cannot build a model that will successfully predict income. You just need to be able to explain why that is the case.
-
-### Extra marks
-
-#### 1. Identify who is the head of the household/main wage earner. Explain what criteria you used to do so.
-
-```{r}
-# dat[, highest_earner := max(PINCP), by = SERIALNO][, main_earger := PINCP == highest_earner]
-```
-
 ## Helper functions
 
 This is a small collection of facilitator functions meant to make the output more readable, and avoid distractions from formatting or complex code.
 
-```{r}
+```{r helper_functions, eval=FALSE}
 
 # fetch the column description from the NAME entries of the data dictionary
 describe_column <- function(col = NULL){
   descrip_index <- match(col, dictionaries$names$column_name)
   descr <- dictionaries$names$description[descrip_index]
-  descr[is.na(descr)] <- 'Not on ACS dictionary'
-}
-
-# quickly format percentage without relying on the {scales} package
-fp <- function(x){
-  round(x*100,2) %>% paste0('%')
+  
+  if(any(is.na(descr))){
+    descr[is.na(descr)] <- 'Not on ACS dictionary'
+  }
+  return(descr)
 }
 
 # run summary statistics over a numerical column of a data.table (optionally grouped)
@@ -1003,16 +1082,9 @@ num_summary <- function(dt, col, by = NULL){
                mean = mean(value, na.rm = TRUE),
                sd = sd(value, na.rm = TRUE),
                min = min(value, na.rm = TRUE),
-               percentile.1 = quantile(value, 0.1, na.rm = TRUE),
-               percentile.2 = quantile(value, 0.2, na.rm = TRUE),
-               percentile.3 = quantile(value, 0.3, na.rm = TRUE),
-               percentile.4 = quantile(value, 0.4, na.rm = TRUE),
-               percentile.5 = quantile(value, 0.5, na.rm = TRUE),
-               percentile.6 = quantile(value, 0.6, na.rm = TRUE),
-               percentile.7 = quantile(value, 0.7, na.rm = TRUE),
-               percentile.8 = quantile(value, 0.8, na.rm = TRUE),
-               percentile.9 = quantile(value, 0.9, na.rm = TRUE),
-               percentile.95 = quantile(value, 0.95, na.rm = TRUE),
+               percentile.25 = quantile(value, 0.25, na.rm = TRUE),
+               percentile.50 = quantile(value, 0.5, na.rm = TRUE),
+               percentile.75 = quantile(value, 0.75, na.rm = TRUE),
                percentile.975 = quantile(value, 0.975, na.rm = TRUE),
                percentile.99 = quantile(value, 0.99, na.rm = TRUE),
                max = max(value, na.rm = TRUE)),
@@ -1023,13 +1095,6 @@ num_summary <- function(dt, col, by = NULL){
   
   return(summ)
 }
-
-# compute pearson correlation while skipping NAs in the y vector
-cor_na.rm <- function(x,y){
-  na_index <- is.na(y)
-  cor(x[!na_index], y[!na_index])
-}
-
 
 # compute the count and percentage of missing entries for each column of a data.frame 
 na_percentage <- function(dt){
@@ -1046,20 +1111,6 @@ discard_cols <- function(dt, cols, regex = FALSE){
   }else{
     dt %>% purrr::discard(str_detect(colnames(.), paste(cols, collapse = '|')))
   }
-}
-
-# removes all columns but the ones matching a character vector (optionally regular expressions)
-keep_cols <- function(dt, cols, regex = FALSE){
-  if(regex){
-    cols <- stringr::str_subset(colnames(dt), paste(cols, collapse = '|'))
-  }else{
-    # warn if any column passed is not present on dt
-    if(!all(cols %in% colnames(dt))){
-      warning(paste0('\nNot all columns found on ', deparse(substitute(dt)), '. Missing columns are:',
-                     paste(cols[!(cols %in% colnames(dt))], collapse = ', ')))
-    }
-  }
-  dt %>% purrr::keep(colnames(.) %in% cols) %>% data.table::setcolorder(cols)
 }
 
 
@@ -1105,9 +1156,23 @@ parse_dictionaries <- function(dict_filename){
   return(dictionaries)
 }
 
+# decode categorical columns with the values provided in the VAL dictionary.
+decode_categoricals <- function(col, dat){
+  # select the dictionary entries speciying column values
+  column_mapping <- dictionaries$values[column_name %chin% col & starting_value == ending_value,
+                                        .(starting_value, description)] %>% 
+    data.table::setkey(starting_value)
+  
+  # data.table 'left join' by reference
+  # technically this is a mutate by reference, not a join
+  matching_statement <- paste0(col, '==', 'starting_value')
+  setkeyv(dat, col)
+  dat[column_mapping, on = matching_statement, (col) := i.description]
+}
+
 pums_for_individual_modelling <- function(person_filename,
-                                         housing_unit_filename,
-                                         dictionary_filename){
+                                          housing_unit_filename,
+                                          dictionary_filename){
 
   tictoc::tic('PUMS files successfully parsed')
   # 0. load and join data ---
@@ -1130,7 +1195,10 @@ pums_for_individual_modelling <- function(person_filename,
   data.table::setkeyv(hu,  join_cols)
   
   # data.table left join
-  dat <- data.table::merge.data.table(x = per, hu, all.x = TRUE)
+  pums <- data.table::merge.data.table(x = per, hu, all.x = TRUE)
+  
+  character_cols <- dictionaries$names[column_type == 'C']$column_name %>% intersect(colnames(dat))
+  pums[, (character_cols) := purrr::map(.SD, as.character), .SDcols = character_cols]
   
   # remove the separate tables from memory
   rm(per)
@@ -1139,34 +1207,34 @@ pums_for_individual_modelling <- function(person_filename,
   # 1. discard columns ----
   
   # weight columns
-  dat <- discard_cols(dt = dat, cols = c('^WGTP', '^PWGTP'), regex = TRUE)
+  pums <- discard_cols(dt = pums, cols = c('^WGTP', '^PWGTP'), regex = TRUE)
   
   # flag columns
   flag_columns <- dictionaries$names[str_detect(description, 'allocation flag')]
-  dat <- discard_cols(dt = dat, cols = flag_columns, regex = TRUE)
+  pums <- discard_cols(dt = pums, cols = flag_columns, regex = TRUE)
   
   # constant_columns
-  unique_values <- data.table(column = colnames(dat),
-                              unique_values = purrr::map_int(dat, uniqueN)
+  unique_values <- data.table(column = colnames(pums),
+                              unique_values = purrr::map_int(pums, uniqueN)
                               )[unique_values == 1]
   
-  dat <- discard_cols(dt = dat, cols = unique_values$column)
+  pums <- discard_cols(dt = pums, cols = unique_values$column)
   
   # 2. data imputation ----
   numeric_impute <- dictionaries$names[column_type == 'N']$column_name %>%
-    intersect(colnames(dat)) %>% 
+    intersect(colnames(pums)) %>% 
     setdiff('PINCP') # our target variable deserves special consideration 
   
-  na_fill(dt = dat,  
+  na_fill(dt = pums,  
           cols = numeric_impute,
           replacement = 0)
   
   # for categoricals, only the variables that have an explicit 'b' = 'Does not apply' field will be replaced.
   categorical_impute <- dictionaries$names[column_type == 'C']$column_name %>%
-    intersect(colnames(dat)) %>% 
+    intersect(colnames(pums)) %>% 
     intersect(dictionaries$values[column_type == 'C' & starting_value == 'b']$column_name)
   
-  na_fill(dt = dat,  
+  na_fill(dt = pums,  
           cols = categorical_impute,
           replacement = 'b')
   
@@ -1180,37 +1248,21 @@ pums_for_individual_modelling <- function(person_filename,
   # These are c("SERIALNO", "SERIALNO", "PUMA", "MIGPUMA", "POWPUMA", "RACNUM")
   exclude_from_decoding <- 
     dictionaries$values[column_type %chin% 'C' & starting_value != ending_value]$column_name
-  columns_to_decode %<>% 
-    setdiff(exclude_from_decoding) 
   
-  # and remove the columns we already removed from the dataset
-  columns_to_decode %<>% 
-    intersect(colnames(dat))
+  columns_to_decode %<>% setdiff(exclude_from_decoding) 
+  
+  # and remove the columns we already removed from the dataaset
+  columns_to_decode %<>% intersect(colnames(pums))
   
   # set all categorical variables as character vectors to avoid type inconsistencies 
-  dat[, (columns_to_decode) := purrr::map(.SD, as.character), .SDcols = columns_to_decode]
+  pums[, (columns_to_decode) := purrr::map(.SD, as.character), .SDcols = columns_to_decode]
   
-  columns_to_decode %>% walk(decode_categoricals, dat = dat)
+  columns_to_decode %>% walk(decode_categoricals, dat = pums)
   
   tictoc::toc()
   
-  return(dat)
+  return(pums[])
 }
-
-# decode categorical columns according to the values dictionary
-decode_categoricals <- function(col, dat){
-  # select the dictionary entries speciying column values
-  column_mapping <- dictionaries$values[column_name %chin% col & starting_value == ending_value,
-                                        .(starting_value, description)] %>% 
-    data.table::setkey(starting_value)
-  
-  # data.table 'left join' by reference
-  # technically this is a mutate by reference, not a join
-  matching_statement <- paste0(col, '==', 'starting_value')
-  setkeyv(dat, col)
-  dat[column_mapping, on = matching_statement, (col) := i.description]
-}
-
 
 # create a new column marking the value band of each observation wrt a continuous column 
 discretize_column <- function(dt,
@@ -1241,8 +1293,8 @@ discretize_column <- function(dt,
   dt[, (bands_column_name) := factor(x = get(bands_column_name), levels = band_names)]
 }
 
-
 ```
+
 
 ## Session Info
 
